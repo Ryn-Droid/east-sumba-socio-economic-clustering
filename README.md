@@ -115,31 +115,6 @@ This formulation allows the model to **reduce the influence of noisy observation
 
 ---
 
-## Repository Structure
-
-```
-project/
-
-├── paper/
-│   └── paper.pdf
-│
-├── notebook/
-│   └── analysis.Rmd
-│
-├── data/
-│   └── dataset.xlsx
-│
-├── output/
-│   └── hasil_anggota_klaster.csv
-│
-├── figures/
-│   └── variable_importance.png
-│
-└── README.md
-```
-
----
-
 ## Key Outcomes
 
 * Identification of **regional development clusters**
