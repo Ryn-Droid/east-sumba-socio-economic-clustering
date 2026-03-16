@@ -1,0 +1,208 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+## Persiapan Library
+
+Tahap awal analisis dilakukan dengan memuat beberapa library yang dibutuhkan untuk proses **clustering Fuzzy Possibilistic C-Means (FPCM)**, analisis statistik, serta visualisasi data.
+
+```{r}
+packages <- c("readxl", "writexl", "dplyr", "ppclust", "fclust", "factoextra", "car", "MASS", "randomForest")
+
+new_packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+if(length(new_packages)) install.packages(new_packages)
+
+library(ppclust)
+library(factoextra)
+library(fclust)
+library(car)
+library(dplyr)
+library(MASS)
+library(randomForest)
+```
+
+
+## Persiapan Data
+
+Tahap ini bertujuan untuk membaca data dari file Excel, memilih variabel yang akan digunakan dalam proses clustering, serta melakukan standardisasi data agar setiap variabel memiliki skala yang sebanding.
+
+```{r}
+# 1. Load Data dari Excel
+# Ganti "dataset.xlsx" dengan nama file Excel yang digunakan
+path_excel <- "data/dataset.xlsx" 
+df <- read_excel(path_excel)
+
+# 2. Pembersihan dan Penyiapan Variabel
+# Menyimpan nama kecamatan sebagai identitas wilayah
+nama_kecamatan <- df$Kecamatan
+
+# Memilih variabel indikator yang digunakan dalam proses clustering
+data_cluster <- df %>% 
+  dplyr::select(
+    Presentase_petani, 
+    'Presentase non-Listrik', 
+    obwis_100, 
+    Coop_1000
+  )
+
+# 3. Standardisasi Data
+# Dilakukan karena setiap variabel memiliki rentang nilai yang berbeda
+data_scaled <- scale(data_cluster)
+```
+
+## Pra-Pemrosesan Data
+
+Tahap ini dilakukan untuk memastikan kualitas data sebelum proses clustering. Dua pemeriksaan utama yang dilakukan adalah **deteksi outlier multivariat** menggunakan jarak Mahalanobis dan **uji multikolinieritas** antar variabel menggunakan Variance Inflation Factor (VIF).
+
+```{r}
+# Deteksi Outlier dengan Mahalanobis Distance
+p <- ncol(data_scaled)
+mahalanobis_dist <- mahalanobis(data_scaled, colMeans(data_scaled), cov(data_scaled))
+threshold <- qchisq(p = 0.95, df = p)
+outliers <- which(mahalanobis_dist > threshold)
+
+if (length(outliers) > 0) {
+  cat("Outlier terdeteksi pada indeks:", outliers, "\n")
+} else {
+  cat("Tidak ada outlier signifikan.\n")
+}
+
+# Uji Multikolinieritas dengan Variance Inflation Factor (VIF)
+model_vif <- lm(rowSums(data_cluster) ~ ., data = data.frame(data_cluster))
+print(vif(model_vif))
+```
+
+## Penentuan Jumlah Klaster Optimal
+
+Pada tahap ini dilakukan pencarian jumlah klaster optimal menggunakan metode **Fuzzy Possibilistic C-Means (FPCM)**. Proses dilakukan dengan mencoba beberapa jumlah klaster dan mengevaluasi kualitas hasil clustering menggunakan beberapa **indeks validitas fuzzy**.
+
+Rentang jumlah klaster yang diuji adalah **2 hingga 8 klaster**.
+
+```{r}
+cat("\n--- BAGIAN 3: LOOPING VALIDITAS FPCM (c=2 s.d. 8) ---\n")
+
+c_range <- 2:8
+hasil_validitas <- data.frame()
+
+set.seed(123)
+
+for (c in c_range) {
+  
+  # Inisialisasi pusat cluster menggunakan FCM
+  res_fcm <- ppclust::fcm(data_scaled, centers = c, m = 2)
+  
+  # Eksekusi algoritma FPCM
+  res_fpcm <- ppclust::fpcm(
+    data_scaled,
+    centers = res_fcm$v,
+    membership = res_fcm$u,
+    m = 2,
+    eta = 2
+  )
+  
+  # Perhitungan indeks validitas
+  pc_val  <- fclust::PC(res_fpcm$u)
+  pe_val  <- fclust::PE(res_fpcm$u)
+  mpc_val <- 1 - (c / (c - 1)) * (1 - pc_val)
+  
+  # Menyimpan hasil evaluasi
+  hasil_validitas <- rbind(
+    hasil_validitas,
+    data.frame(Klaster = c, MPC = mpc_val, PC = pc_val, PE = pe_val)
+  )
+}
+
+print(hasil_validitas)
+
+# Menentukan jumlah klaster terbaik
+c_opt <- hasil_validitas$Klaster[which.max(hasil_validitas$MPC)]
+cat("\nKlaster Optimum terpilih (MPC tertinggi):", c_opt, "\n")
+```
+
+## Clustering Final dan Profiling Klaster
+Setelah jumlah klaster optimal diperoleh, tahap berikutnya adalah melakukan **clustering final menggunakan metode Fuzzy Possibilistic C-Means (FPCM)**. Proses ini menghasilkan keanggotaan setiap observasi pada klaster serta pusat klaster (centroid) yang menggambarkan karakteristik masing-masing klaster.
+
+```{r}
+cat("\n--- BAGIAN 4: FINAL CLUSTERING ---\n")
+
+# Inisialisasi menggunakan FCM
+final_fcm <- ppclust::fcm(data_scaled, centers = 3, m = 2)
+
+# Clustering final menggunakan FPCM
+final_fpcm <- ppclust::fpcm(
+  data_scaled,
+  centers = final_fcm$v,
+  membership = final_fcm$u,
+  m = 2,
+  eta = 2
+)
+
+# Mengembalikan centroid ke skala asli
+data_mean <- sapply(data_cluster, mean)
+data_sd   <- sapply(data_cluster, sd)
+
+profil_klaster <- t(t(final_fpcm$v) * data_sd + data_mean)
+rownames(profil_klaster) <- paste("Cluster", 1:3)
+
+print(profil_klaster)
+```
+```{r}
+hasil_akhir <- data.frame(
+  Kecamatan = nama_kecamatan,
+  Klaster = final_fpcm$cluster,
+  data_cluster
+)
+
+write.csv(hasil_akhir, "hasil_anggota_klaster.csv", row.names = FALSE)
+```
+
+## Validasi Klaster dengan Analisis Diskriminan
+
+Tahap ini dilakukan untuk mengevaluasi konsistensi hasil clustering menggunakan **Linear Discriminant Analysis (LDA)**. Metode ini digunakan untuk menguji apakah variabel indikator mampu membedakan klaster yang telah terbentuk.
+
+```{r}
+cat("\n--- BAGIAN 5: ANALISIS DISKRIMINAN (LDA) ---\n")
+
+# Mengubah label klaster menjadi faktor
+hasil_akhir$Klaster <- as.factor(hasil_akhir$Klaster)
+
+# Membentuk model Linear Discriminant Analysis
+model_lda <- lda(Klaster ~ ., data = hasil_akhir[,-1]) 
+# Kolom pertama (nama kecamatan) tidak digunakan dalam model
+
+# Prediksi klaster menggunakan model LDA
+pred_lda <- predict(model_lda)$class
+
+# Membuat tabel konfusi
+tabel_konfusi <- table(
+  Aktual = hasil_akhir$Klaster,
+  Prediksi = pred_lda
+)
+
+# Menghitung akurasi klasifikasi
+akurasi <- sum(diag(tabel_konfusi)) / sum(tabel_konfusi) * 100
+cat("Akurasi Model LDA:", akurasi, "%\n")
+```
+## Analisis Pentingnya Variabel dengan Random Forest
+
+Selain analisis diskriminan, dilakukan juga analisis **Random Forest** untuk mengidentifikasi variabel indikator yang paling berpengaruh dalam pembentukan klaster. Metode ini merupakan pendekatan **machine learning berbasis ensemble decision tree** yang mampu mengukur kontribusi setiap variabel terhadap proses klasifikasi.
+
+```{r}
+cat("\n--- BAGIAN 6: RANDOM FOREST (IMPORTANCE) ---\n")
+
+set.seed(123)
+
+# Membangun model Random Forest
+rf_model <- randomForest(
+  Klaster ~ ., 
+  data = hasil_akhir[,-1], 
+  importance = TRUE
+)
+
+# Menampilkan nilai importance variabel
+print(importance(rf_model))
+``` 
+
+
+
+
